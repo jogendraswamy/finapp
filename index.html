@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Equipment Finapp - Instant Load</title>
+    <title>Equipment Finapp - JCB & Tractor Tracker</title>
     <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -11,7 +11,7 @@
     <script src="https://unpkg.com/lucide@latest"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
-<body className="bg-gray-100 text-gray-800 font-sans antialiased">
+<body class="bg-gray-100 text-gray-800 font-sans antialiased">
     <div id="root"></div>
 
     <script type="text/babel">
@@ -34,6 +34,630 @@
             TRACTOR: {
                 name: 'Tractor',
                 icon: 'truck',
+                themeColor: 'bg-emerald-600',
+                themeTextColor: 'text-emerald-700',
+                themeBorderColor: 'border-emerald-600',
+                themeAccentText: 'text-emerald-600',
+                accentBg: 'bg-emerald-600',
+                incomeCategories: ['Ploughing / Tillage', 'Rotavator / Cultivator', 'Trolley / Haulage', 'Thresher / Harvesting', 'Hourly Rent', 'Other'],
+                expenseCategories: ['Diesel', 'Driver Salary/Bata', 'Maintenance / Servicing', 'Tyre Repairs', 'Implements / Spares', 'EMI/Loan', 'Grease & Lubricants', 'Other']
+            }
+        };
+
+        function App() {
+            const [activeVehicle, setActiveVehicle] = useState('JCB');
+            const [transactions, setTransactions] = useState([]);
+            const [loans, setLoans] = useState(() => {
+                const savedLoans = localStorage.getItem('equipment_loans');
+                return savedLoans ? JSON.parse(savedLoans) : [];
+            });
+            const [view, setView] = useState('dashboard');
+            const [isLoading, setIsLoading] = useState(true);
+
+            const currentVehicleConfig = VEHICLE_CONFIGS[activeVehicle];
+
+            useEffect(() => {
+                fetch(SCRIPT_URL)
+                    .then(res => res.json())
+                    .then(data => {
+                        const parsed = data.map(item => {
+                            let vehicleType = item.vehicle || 'JCB';
+                            if (!item.vehicle && item.notes && item.notes.startsWith('[') && item.notes.includes(']')) {
+                                const tag = item.notes.substring(1, item.notes.indexOf(']')).toUpperCase();
+                                if (tag === 'TRACTOR' || tag === 'JCB') {
+                                    vehicleType = tag;
+                                }
+                            }
+                            return { ...item, vehicle: vehicleType };
+                        });
+                        const sortedData = parsed.sort((a, b) => new Date(b.date) - new Date(a.date));
+                        setTransactions(sortedData);
+                        setIsLoading(false);
+                    })
+                    .catch(err => {
+                        console.error("Fetch Error:", err);
+                        setIsLoading(false);
+                    });
+            }, []);
+
+            useEffect(() => {
+                localStorage.setItem('equipment_loans', JSON.stringify(loans));
+            }, [loans]);
+
+            useEffect(() => {
+                lucide.createIcons();
+            }, [transactions, view, isLoading, loans, activeVehicle]);
+
+            const filteredTransactions = useMemo(() => {
+                return transactions.filter(t => (t.vehicle || 'JCB') === activeVehicle);
+            }, [transactions, activeVehicle]);
+
+            const filteredLoans = useMemo(() => {
+                return loans.filter(l => (l.vehicle || 'JCB') === activeVehicle);
+            }, [loans, activeVehicle]);
+
+            const addTransaction = (txn) => {
+                const txnWithVehicle = {
+                    ...txn,
+                    vehicle: activeVehicle,
+                    notes: `[${activeVehicle}] ${txn.notes || ''}`.trim()
+                };
+
+                const updatedTxns = [txnWithVehicle, ...transactions].sort((a, b) => new Date(b.date) - new Date(a.date));
+                setTransactions(updatedTxns);
+                
+                fetch(SCRIPT_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                    body: JSON.stringify(txnWithVehicle),
+                    redirect: 'follow'
+                }).catch(err => console.error("Database sync error:", err));
+            };
+
+            const addLoan = (newLoan) => {
+                setLoans([...loans, { ...newLoan, vehicle: activeVehicle, id: Date.now(), emisiPaid: [] }]);
+            };
+
+            const recordEMI = (loanId, emiAmount, date) => {
+                const targetLoan = loans.find(l => l.id === loanId);
+                const updatedLoans = loans.map(loan => {
+                    if (loan.id === loanId) {
+                        return {
+                            ...loan,
+                            emisiPaid: [...loan.emisiPaid, { amount: emiAmount, date, id: Date.now() }]
+                        };
+                    }
+                    return loan;
+                });
+                setLoans(updatedLoans);
+
+                addTransaction({
+                    date: date,
+                    amount: emiAmount,
+                    category: 'EMI/Loan',
+                    partyName: `EMI - ${targetLoan ? targetLoan.bankName : ''}`,
+                    notes: `EMI logged from Loans tab for ${targetLoan ? targetLoan.machineName : activeVehicle}`,
+                    type: 'expense',
+                    id: Date.now()
+                });
+            };
+
+            const totals = useMemo(() => {
+                return filteredTransactions.reduce((acc, curr) => {
+                    const amt = parseFloat(curr.amount);
+                    if (isNaN(amt)) return acc;
+                    if (curr.type === 'income') acc.income += amt;
+                    if (curr.type === 'expense') {
+                        acc.expense += amt;
+                        if (curr.category === 'Diesel') acc.diesel += amt;
+                    }
+                    return acc;
+                }, { income: 0, expense: 0, diesel: 0 });
+            }, [filteredTransactions]);
+
+            const profit = totals.income - totals.expense;
+
+            return (
+                <div className="max-w-md mx-auto bg-white min-h-screen shadow-lg relative flex flex-col">
+                    {/* Header */}
+                    <header className={`${currentVehicleConfig.themeColor} text-white p-4 shadow flex items-center justify-between transition-colors duration-200 z-10`}>
+                        <div>
+                            <h1 className="text-xl font-bold flex items-center gap-2">
+                                <i data-lucide={currentVehicleConfig.icon} className="w-6 h-6"></i>
+                                {currentVehicleConfig.name} Finapp
+                            </h1>
+                            <p className="text-xs text-white/90 font-medium">Income & Expense Tracker</p>
+                        </div>
+                        
+                        {/* Vehicle Switch Toggle Button */}
+                        <div className="bg-black/25 p-1 rounded-xl flex items-center gap-1 border border-white/20">
+                            <button
+                                onClick={() => setActiveVehicle('JCB')}
+                                className={`px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1 transition ${activeVehicle === 'JCB' ? 'bg-white text-gray-900 shadow' : 'text-white/80 hover:text-white'}`}
+                            >
+                                <i data-lucide="tractor" className="w-3.5 h-3.5"></i> JCB
+                            </button>
+                            <button
+                                onClick={() => setActiveVehicle('TRACTOR')}
+                                className={`px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1 transition ${activeVehicle === 'TRACTOR' ? 'bg-white text-emerald-800 shadow' : 'text-white/80 hover:text-white'}`}
+                            >
+                                <i data-lucide="truck" className="w-3.5 h-3.5"></i> Tractor
+                            </button>
+                        </div>
+                    </header>
+
+                    {/* Active Mode Banner */}
+                    <div className="bg-gray-100 px-4 py-1.5 border-b flex justify-between items-center text-xs text-gray-600">
+                        <span>Viewing: <strong className="text-gray-900">{activeVehicle}</strong> Records</span>
+                        <span className="font-semibold text-gray-500">{filteredTransactions.length} items</span>
+                    </div>
+
+                    {/* Main Content Area */}
+                    <main className="p-4 flex-grow overflow-y-auto pb-24">
+                        {isLoading ? (
+                            <div className="flex flex-col items-center justify-center py-20 text-gray-500">
+                                <i data-lucide="loader-2" className="w-8 h-8 animate-spin mb-2 text-yellow-500"></i>
+                                <p className="font-bold">Loading Your Data...</p>
+                            </div>
+                        ) : view === 'dashboard' ? (
+                            <Dashboard totals={totals} profit={profit} transactions={filteredTransactions} vehicle={activeVehicle} config={currentVehicleConfig} />
+                        ) : view === 'charts' ? (
+                            <ChartsView transactions={filteredTransactions} vehicle={activeVehicle} />
+                        ) : view === 'loans' ? (
+                            <LoansView loans={filteredLoans} onAddLoan={addLoan} onRecordEMI={recordEMI} vehicle={activeVehicle} config={currentVehicleConfig} />
+                        ) : (
+                            <AddTransactionForm onAdd={addTransaction} vehicle={activeVehicle} config={currentVehicleConfig} />
+                        )}
+                    </main>
+
+                    {/* Bottom Nav */}
+                    <nav className="fixed bottom-0 w-full max-w-md bg-white border-t flex shadow-[0_-2px_10px_rgba(0,0,0,0.05)] z-20">
+                        <button onClick={() => setView('dashboard')} className={`flex-1 py-3 flex flex-col items-center justify-center ${view === 'dashboard' ? currentVehicleConfig.themeAccentText : 'text-gray-400'}`}>
+                            <i data-lucide="layout-dashboard" className="w-5 h-5 mb-1"></i>
+                            <span className="text-[10px] font-bold">Home</span>
+                        </button>
+                        <button onClick={() => setView('charts')} className={`flex-1 py-3 flex flex-col items-center justify-center ${view === 'charts' ? currentVehicleConfig.themeAccentText : 'text-gray-400'}`}>
+                            <i data-lucide="pie-chart" className="w-5 h-5 mb-1"></i>
+                            <span className="text-[10px] font-bold">Charts</span>
+                        </button>
+                        <button onClick={() => setView('add')} className={`flex-1 py-3 flex flex-col items-center justify-center ${view === 'add' ? currentVehicleConfig.themeAccentText : 'text-gray-400'}`}>
+                            <div className={`w-8 h-8 rounded-full flex items-center justify-center mb-1 ${view === 'add' ? `${currentVehicleConfig.accentBg} text-white` : 'bg-gray-200 text-gray-600'}`}>
+                                <i data-lucide="plus" className="w-5 h-5"></i>
+                            </div>
+                            <span className="text-[10px] font-bold">Add Entry</span>
+                        </button>
+                        <button onClick={() => setView('loans')} className={`flex-1 py-3 flex flex-col items-center justify-center ${view === 'loans' ? currentVehicleConfig.themeAccentText : 'text-gray-400'}`}>
+                            <i data-lucide="landmark" className="w-5 h-5 mb-1"></i>
+                            <span className="text-[10px] font-bold">Loans</span>
+                        </button>
+                    </nav>
+                </div>
+            );
+        }
+
+        // --- DASHBOARD COMPONENT ---
+        function Dashboard({ totals, profit, transactions, vehicle, config }) {
+            return (
+                <div className="space-y-6">
+                    <div className="grid grid-cols-2 gap-4">
+                        <div className="bg-green-50 p-4 rounded-lg shadow-sm border border-green-200">
+                            <p className="text-xs text-green-700 font-bold uppercase tracking-wider">{vehicle} Income</p>
+                            <p className="text-xl font-bold text-green-900 mt-1">₹{totals.income.toLocaleString()}</p>
+                        </div>
+                        <div className="bg-red-50 p-4 rounded-lg shadow-sm border border-red-200">
+                            <p className="text-xs text-red-700 font-bold uppercase tracking-wider">{vehicle} Expenses</p>
+                            <p className="text-xl font-bold text-red-900 mt-1">₹{totals.expense.toLocaleString()}</p>
+                        </div>
+                        <div className="bg-blue-50 p-4 rounded-lg shadow-sm border border-blue-200 col-span-2 flex justify-between items-center">
+                            <div>
+                                <p className="text-xs text-blue-700 font-bold uppercase tracking-wider">Net Profit</p>
+                                <p className={`text-2xl font-bold mt-1 ${profit >= 0 ? 'text-blue-900' : 'text-red-600'}`}>
+                                    ₹{profit.toLocaleString()}
+                                </p>
+                            </div>
+                            <div className="text-right">
+                                <p className="text-xs text-gray-500 uppercase font-bold">Diesel Cost</p>
+                                <p className="text-sm font-bold text-gray-700 mt-1">₹{totals.diesel.toLocaleString()}</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div>
+                        <h2 className="font-bold text-gray-700 mb-3 border-b pb-2 flex justify-between items-center">
+                            <span>{vehicle} Recent Records</span>
+                            <span className="text-xs bg-gray-100 px-2 py-0.5 rounded text-gray-600 font-normal">Filtered</span>
+                        </h2>
+                        {transactions.length === 0 ? (
+                            <p className="text-gray-400 text-center text-sm py-8">No records found for {vehicle}.</p>
+                        ) : (
+                            <div className="space-y-3">
+                                {transactions.map((txn, index) => {
+                                    const cleanNotes = (txn.notes || '').replace(/^\[(JCB|TRACTOR)\]\s*/i, '');
+                                    return (
+                                        <div key={txn.id || index} className="bg-white border rounded-lg p-3 flex justify-between items-center shadow-sm">
+                                            <div className="flex items-center gap-3">
+                                                <div className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${txn.type === 'income' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}`}>
+                                                    <i data-lucide={txn.type === 'income' ? 'arrow-down-left' : 'arrow-up-right'} className="w-5 h-5"></i>
+                                                </div>
+                                                <div className="overflow-hidden">
+                                                    <p className="font-bold text-sm text-gray-800 truncate">{txn.category}</p>
+                                                    <p className="text-xs text-gray-500 truncate">{txn.date} • {txn.partyName || 'N/A'}</p>
+                                                    {cleanNotes && <p className="text-[11px] text-gray-400 truncate mt-0.5">{cleanNotes}</p>}
+                                                </div>
+                                            </div>
+                                            <div className="text-right flex flex-col items-end flex-shrink-0 ml-2">
+                                                <p className={`font-bold ${txn.type === 'income' ? 'text-green-600' : 'text-red-600'}`}>
+                                                    {txn.type === 'income' ? '+' : '-'}₹{parseFloat(txn.amount).toLocaleString()}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        // --- CHARTS VIEW COMPONENT ---
+        function ChartsView({ transactions, vehicle }) {
+            const barChartRef = useRef(null);
+            const lineChartRef = useRef(null);
+            const expenseChartRef = useRef(null);
+            const [timeframe, setTimeframe] = useState('monthly');
+
+            useEffect(() => {
+                if (transactions.length === 0) return;
+
+                const groupedData = {};
+                const categoryData = {};
+                const chartTransactions = [...transactions].sort((a, b) => new Date(a.date) - new Date(b.date));
+
+                chartTransactions.forEach(txn => {
+                    if(!txn.date) return;
+                    const dateObj = new Date(txn.date);
+                    let label = '';
+
+                    if (timeframe === 'daily') {
+                        label = dateObj.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+                    } else if (timeframe === 'weekly') {
+                        const day = dateObj.getDay();
+                        const diff = dateObj.getDate() - day + (day === 0 ? -6 : 1);
+                        const monday = new Date(new Date(dateObj).setDate(diff));
+                        label = "Wk of " + monday.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+                    } else {
+                        label = dateObj.toLocaleString('default', { month: 'short', year: '2-digit' });
+                    }
+                    
+                    if (!groupedData[label]) {
+                        groupedData[label] = { income: 0, expense: 0 };
+                    }
+                    
+                    const amt = parseFloat(txn.amount) || 0;
+                    if (txn.type === 'income') groupedData[label].income += amt;
+                    if (txn.type === 'expense') {
+                        groupedData[label].expense += amt;
+                        categoryData[txn.category] = (categoryData[txn.category] || 0) + amt;
+                    }
+                });
+
+                const labels = Object.keys(groupedData);
+                const incomeData = labels.map(label => groupedData[label].income);
+                const expenseData = labels.map(label => groupedData[label].expense);
+
+                const pieLabels = Object.keys(categoryData);
+                const pieValues = Object.values(categoryData);
+
+                let barChart, lineChart, expenseChart;
+
+                if (barChartRef.current) {
+                    barChart = new Chart(barChartRef.current, {
+                        type: 'bar',
+                        data: {
+                            labels: labels,
+                            datasets: [
+                                { label: 'Income (₹)', data: incomeData, backgroundColor: '#16a34a' },
+                                { label: 'Expense (₹)', data: expenseData, backgroundColor: '#dc2626' }
+                            ]
+                        },
+                        options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
+                    });
+                }
+
+                if (lineChartRef.current) {
+                    lineChart = new Chart(lineChartRef.current, {
+                        type: 'line',
+                        data: {
+                            labels: labels,
+                            datasets: [
+                                { label: 'Income Trend (₹)', data: incomeData, borderColor: '#16a34a', backgroundColor: 'rgba(22, 163, 74, 0.1)', fill: true, tension: 0.3 },
+                                { label: 'Expense Trend (₹)', data: expenseData, borderColor: '#dc2626', backgroundColor: 'rgba(220, 38, 38, 0.1)', fill: true, tension: 0.3 }
+                            ]
+                        },
+                        options: { responsive: true, plugins: { legend: { position: 'bottom' } }, scales: { y: { beginAtZero: true } } }
+                    });
+                }
+
+                if (expenseChartRef.current) {
+                    expenseChart = new Chart(expenseChartRef.current, {
+                        type: 'doughnut',
+                        data: {
+                            labels: pieLabels,
+                            datasets: [{
+                                data: pieValues,
+                                backgroundColor: ['#ef4444', '#f97316', '#eab308', '#3b82f6', '#a855f7', '#14b8a6', '#64748b']
+                            }]
+                        },
+                        options: { responsive: true, plugins: { legend: { position: 'right', labels: { boxWidth: 12, font: { size: 10 } } } } }
+                    });
+                }
+
+                return () => {
+                    if (barChart) barChart.destroy();
+                    if (lineChart) lineChart.destroy();
+                    if (expenseChart) expenseChart.destroy();
+                };
+            }, [transactions, timeframe, vehicle]);
+
+            return (
+                <div className="space-y-6">
+                    <div className="flex p-1 bg-gray-200 rounded-lg shadow-inner">
+                        <button onClick={() => setTimeframe('daily')} className={`flex-1 py-2 rounded-md text-sm font-bold transition-all ${timeframe === 'daily' ? 'bg-white shadow text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>Daily</button>
+                        <button onClick={() => setTimeframe('weekly')} className={`flex-1 py-2 rounded-md text-sm font-bold transition-all ${timeframe === 'weekly' ? 'bg-white shadow text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>Weekly</button>
+                        <button onClick={() => setTimeframe('monthly')} className={`flex-1 py-2 rounded-md text-sm font-bold transition-all ${timeframe === 'monthly' ? 'bg-white shadow text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>Monthly</button>
+                    </div>
+
+                    {transactions.length === 0 ? (
+                        <p className="text-gray-400 text-center py-8">Not enough data to display {vehicle} charts.</p>
+                    ) : (
+                        <>
+                            <div className="bg-white p-4 rounded-lg shadow-sm border">
+                                <h3 className="font-bold text-gray-700 mb-4 text-center">{vehicle} Income vs Expenses ({timeframe})</h3>
+                                <canvas ref={barChartRef}></canvas>
+                            </div>
+                            <div className="bg-white p-4 rounded-lg shadow-sm border">
+                                <h3 className="font-bold text-gray-700 mb-4 text-center">{vehicle} Trend Overview ({timeframe})</h3>
+                                <canvas ref={lineChartRef}></canvas>
+                            </div>
+                            <div className="bg-white p-4 rounded-lg shadow-sm border">
+                                <h3 className="font-bold text-gray-700 mb-4 text-center">{vehicle} Major Expenses Breakdown</h3>
+                                <canvas ref={expenseChartRef}></canvas>
+                            </div>
+                        </>
+                    )}
+                </div>
+            );
+        }
+
+        // --- LOANS VIEW COMPONENT ---
+        function LoansView({ loans, onAddLoan, onRecordEMI, vehicle, config }) {
+            const [showAddForm, setShowAddForm] = useState(false);
+            const [selectedLoan, setSelectedLoan] = useState(null);
+            const [emiForm, setEmiForm] = useState({ date: new Date().toISOString().split('T')[0], amount: '' });
+
+            const [newLoanData, setNewLoanData] = useState({
+                machineName: '',
+                bankName: '',
+                totalLoanAmount: '',
+                downPayment: '',
+                emiAmount: '',
+                totalMonths: '',
+                startDate: new Date().toISOString().split('T')[0]
+            });
+
+            const handleAddLoanSubmit = (e) => {
+                e.preventDefault();
+                onAddLoan(newLoanData);
+                setShowAddForm(false);
+                setNewLoanData({ machineName: '', bankName: '', totalLoanAmount: '', downPayment: '', emiAmount: '', totalMonths: '', startDate: new Date().toISOString().split('T')[0] });
+            };
+
+            const handleEmiSubmit = (e) => {
+                e.preventDefault();
+                onRecordEMI(selectedLoan, parseFloat(emiForm.amount), emiForm.date);
+                setSelectedLoan(null);
+                setEmiForm({ date: new Date().toISOString().split('T')[0], amount: '' });
+                alert(`EMI recorded successfully and added to ${vehicle} Expenses!`);
+            };
+
+            if (showAddForm) {
+                return (
+                    <div className="space-y-4">
+                        <div className="flex items-center justify-between border-b pb-2">
+                            <h2 className="font-bold text-gray-700">Add New {vehicle} Loan</h2>
+                            <button onClick={() => setShowAddForm(false)} className="text-gray-500 hover:text-red-500 text-sm">Cancel</button>
+                        </div>
+                        <form onSubmit={handleAddLoanSubmit} className="space-y-4">
+                            <div><label className="block text-xs font-bold text-gray-600 mb-1">Model / Asset Name</label><input type="text" value={newLoanData.machineName} onChange={e => setNewLoanData({...newLoanData, machineName: e.target.value})} required className="w-full border p-2 rounded-lg bg-gray-50" placeholder={vehicle === 'JCB' ? 'e.g. JCB 3DX Plus' : 'e.g. Mahindra 575 DI'} /></div>
+                            <div><label className="block text-xs font-bold text-gray-600 mb-1">Bank / Financer Name</label><input type="text" value={newLoanData.bankName} onChange={e => setNewLoanData({...newLoanData, bankName: e.target.value})} required className="w-full border p-2 rounded-lg bg-gray-50" placeholder="e.g. HDFC / SBI / Cholamandalam" /></div>
+                            <div><label className="block text-xs font-bold text-gray-600 mb-1">Total Loan Amount (₹)</label><input type="number" value={newLoanData.totalLoanAmount} onChange={e => setNewLoanData({...newLoanData, totalLoanAmount: e.target.value})} required className="w-full border p-2 rounded-lg bg-gray-50" /></div>
+                            <div><label className="block text-xs font-bold text-gray-600 mb-1">Downpayment Paid (₹)</label><input type="number" value={newLoanData.downPayment} onChange={e => setNewLoanData({...newLoanData, downPayment: e.target.value})} required className="w-full border p-2 rounded-lg bg-gray-50" /></div>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div><label className="block text-xs font-bold text-gray-600 mb-1">Monthly EMI (₹)</label><input type="number" value={newLoanData.emiAmount} onChange={e => setNewLoanData({...newLoanData, emiAmount: e.target.value})} required className="w-full border p-2 rounded-lg bg-gray-50" /></div>
+                                <div><label className="block text-xs font-bold text-gray-600 mb-1">Tenure (Months)</label><input type="number" value={newLoanData.totalMonths} onChange={e => setNewLoanData({...newLoanData, totalMonths: e.target.value})} required className="w-full border p-2 rounded-lg bg-gray-50" /></div>
+                            </div>
+                            <div><label className="block text-xs font-bold text-gray-600 mb-1">EMI Start Date</label><input type="date" value={newLoanData.startDate} onChange={e => setNewLoanData({...newLoanData, startDate: e.target.value})} required className="w-full border p-2 rounded-lg bg-gray-50" /></div>
+                            <button type="submit" className={`w-full py-3 ${config.accentBg} hover:opacity-95 text-white rounded-lg font-bold mt-4 shadow-sm`}>Save {vehicle} Loan</button>
+                        </form>
+                    </div>
+                );
+            }
+
+            if (selectedLoan) {
+                const loanDetails = loans.find(l => l.id === selectedLoan);
+                return (
+                    <div className="space-y-4">
+                        <div className="flex items-center justify-between border-b pb-2">
+                            <h2 className="font-bold text-gray-700">Record {vehicle} EMI</h2>
+                            <button onClick={() => setSelectedLoan(null)} className="text-gray-500 hover:text-red-500 text-sm">Cancel</button>
+                        </div>
+                        <div className="bg-blue-50 p-3 rounded-lg border border-blue-100 mb-4">
+                            <p className="text-sm font-bold text-blue-900">{loanDetails.machineName} - {loanDetails.bankName}</p>
+                            <p className="text-xs text-blue-700 mt-1">Standard EMI: ₹{parseFloat(loanDetails.emiAmount).toLocaleString()}</p>
+                        </div>
+                        <form onSubmit={handleEmiSubmit} className="space-y-4">
+                            <div><label className="block text-xs font-bold text-gray-600 mb-1">Payment Date</label><input type="date" value={emiForm.date} onChange={e => setEmiForm({...emiForm, date: e.target.value})} required className="w-full border p-2 rounded-lg bg-gray-50" /></div>
+                            <div><label className="block text-xs font-bold text-gray-600 mb-1">Amount Paid (₹)</label><input type="number" value={emiForm.amount} onChange={e => setEmiForm({...emiForm, amount: e.target.value})} placeholder={loanDetails.emiAmount} required className="w-full border p-2 rounded-lg bg-gray-50 text-lg font-bold" /></div>
+                            <button type="submit" className="w-full py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-bold mt-4 shadow-sm">Confirm Payment</button>
+                            <p className="text-xs text-center text-gray-500 mt-2">Automatically logs to your {vehicle} expenses.</p>
+                        </form>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="space-y-6">
+                    <div className="flex justify-between items-center border-b pb-2">
+                        <h2 className="font-bold text-gray-700">{vehicle} Loans</h2>
+                        <button onClick={() => setShowAddForm(true)} className={`text-sm ${config.accentBg} text-white px-3 py-1.5 rounded-full font-bold flex items-center gap-1 shadow-sm hover:opacity-90 transition`}>
+                            <i data-lucide="plus" className="w-4 h-4"></i> Add Loan
+                        </button>
+                    </div>
+
+                    {loans.length === 0 ? (
+                        <div className="text-center py-12 bg-gray-50 rounded-lg border border-dashed border-gray-300">
+                            <i data-lucide="landmark" className="w-12 h-12 text-gray-300 mx-auto mb-3"></i>
+                            <p className="text-gray-500 font-medium">No active loans for {vehicle}.</p>
+                            <p className="text-xs text-gray-400 mt-1">Track downpayment and monthly EMIs here.</p>
+                        </div>
+                    ) : (
+                        <div className="space-y-4">
+                            {loans.map(loan => {
+                                const totalPaid = loan.emisiPaid.reduce((sum, emi) => sum + parseFloat(emi.amount), 0);
+                                const totalLoanAmt = parseFloat(loan.totalLoanAmount);
+                                const progressPercent = Math.min((totalPaid / totalLoanAmt) * 100, 100).toFixed(1);
+                                const emisPaidCount = loan.emisiPaid.length;
+                                
+                                return (
+                                    <div key={loan.id} className="bg-white p-4 rounded-lg shadow-sm border border-gray-200">
+                                        <div className="flex justify-between items-start mb-3">
+                                            <div>
+                                                <h3 className="font-bold text-gray-800">{loan.machineName}</h3>
+                                                <p className="text-xs text-gray-500 font-medium flex items-center gap-1 mt-0.5"><i data-lucide="building-2" className="w-3 h-3"></i> {loan.bankName}</p>
+                                            </div>
+                                            <div className="text-right">
+                                                <p className="text-[10px] uppercase font-bold text-gray-400 tracking-wider">EMI Amount</p>
+                                                <p className="font-bold text-red-600">₹{parseFloat(loan.emiAmount).toLocaleString()}</p>
+                                            </div>
+                                        </div>
+                                        
+                                        <div className="grid grid-cols-2 gap-2 mb-4 p-2 bg-gray-50 rounded border text-sm">
+                                            <div>
+                                                <p className="text-[10px] text-gray-500 font-bold uppercase">Downpayment</p>
+                                                <p className="font-semibold text-gray-700">₹{parseFloat(loan.downPayment).toLocaleString()}</p>
+                                            </div>
+                                            <div>
+                                                <p className="text-[10px] text-gray-500 font-bold uppercase">Total Loan</p>
+                                                <p className="font-semibold text-gray-700">₹{totalLoanAmt.toLocaleString()}</p>
+                                            </div>
+                                        </div>
+
+                                        <div className="mb-4">
+                                            <div className="flex justify-between text-xs font-bold text-gray-600 mb-1">
+                                                <span>Repayment Progress</span>
+                                                <span>{emisPaidCount} / {loan.totalMonths} Months</span>
+                                            </div>
+                                            <div className="w-full bg-gray-200 rounded-full h-2">
+                                                <div className={`${config.accentBg} h-2 rounded-full`} style={{ width: `${progressPercent}%` }}></div>
+                                            </div>
+                                            <p className="text-[10px] text-gray-500 mt-1 text-right">{progressPercent}% Paid (₹{totalPaid.toLocaleString()})</p>
+                                        </div>
+
+                                        <button 
+                                            onClick={() => {
+                                                setSelectedLoan(loan.id);
+                                                setEmiForm(prev => ({ ...prev, amount: loan.emiAmount }));
+                                            }} 
+                                            className="w-full py-2 bg-gray-50 text-gray-700 hover:bg-gray-100 rounded font-bold text-sm border border-gray-200 transition"
+                                        >
+                                            Pay EMI
+                                        </button>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // --- FORM COMPONENT ---
+        function AddTransactionForm({ onAdd, vehicle, config }) {
+            const [type, setType] = useState('income');
+            const [formData, setFormData] = useState({
+                date: new Date().toISOString().split('T')[0],
+                amount: '',
+                category: config.incomeCategories[0],
+                partyName: '',
+                notes: ''
+            });
+
+            useEffect(() => {
+                setFormData(prev => ({
+                    ...prev,
+                    category: type === 'income' ? config.incomeCategories[0] : config.expenseCategories[0]
+                }));
+            }, [vehicle, type]);
+
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                if (!formData.amount || !formData.date) return;
+                const newTxn = { ...formData, type, id: Date.now() };
+                onAdd(newTxn);
+                setFormData({
+                    date: new Date().toISOString().split('T')[0],
+                    amount: '',
+                    category: type === 'income' ? config.incomeCategories[0] : config.expenseCategories[0],
+                    partyName: '',
+                    notes: ''
+                });
+            };
+
+            const handleChange = (e) => setFormData({ ...formData, [e.target.name]: e.target.value });
+
+            return (
+                <form onSubmit={handleSubmit} className="space-y-4">
+                    <div className="flex p-1 bg-gray-200 rounded-lg">
+                        <button type="button" onClick={() => setType('income')} className={`flex-1 py-2 rounded-md text-sm font-bold ${type === 'income' ? 'bg-white shadow text-green-600' : 'text-gray-500'}`}>Income</button>
+                        <button type="button" onClick={() => setType('expense')} className={`flex-1 py-2 rounded-md text-sm font-bold ${type === 'expense' ? 'bg-white shadow text-red-600' : 'text-gray-500'}`}>Expense</button>
+                    </div>
+                    <div>
+                        <label className="block text-xs font-bold text-gray-600 mb-1">Date</label>
+                        <input type="date" name="date" value={formData.date} onChange={handleChange} required className="w-full border p-2 rounded-lg bg-gray-50" />
+                    </div>
+                    <div>
+                        <label className="block text-xs font-bold text-gray-600 mb-1">Amount (₹)</label>
+                        <input type="number" name="amount" value={formData.amount} onChange={handleChange} required placeholder="0.00" className="w-full border p-2 rounded-lg bg-gray-50 text-lg font-bold" />
+                    </div>
+                    <div>
+                        <label className="block text-xs font-bold text-gray-600 mb-1">{vehicle} Category</label>
+                        <select name="category" value={formData.category} onChange={handleChange} className="w-full border p-2 rounded-lg bg-gray-50">
+                            {(type === 'income' ? config.incomeCategories : config.expenseCategories).map(cat => (
+                                <option key={cat} value={cat}>{cat}</option>
+                            ))}
+                        </select>
+                    </div>
+                    <div>
+                        <label className="block text-xs font-bold text-gray-600 mb-1">{type === 'income' ? 'Customer / Farm Name' : 'Vendor / Fuel Station'}</label>
+                        <input type="text" name="partyName" value={formData.partyName} onChange={handleChange} placeholder="e.g. Field Acreage, Ramesh, Fuel Pump" className="w-full border p-2 rounded-lg bg-gray-50" />
+                    </div>
+                    <div>
+                        <label className="block text-xs font-bold text-gray-600 mb-1">{vehicle === 'JCB' ? 'Notes / Machine Hours' : 'Notes / Acres & Hours'}</label>
+                        <input type="text" name="notes" value={formData.notes} onChange={handleChange} placeholder={vehicle === 'TRACTOR' ? 'e.g. 5 acres rotavator, 40L Diesel' : 'e.g. 50L Diesel, HMR: 4500'} className="w-full border p-2 rounded-lg bg-gray-50" />
+                    </div>
+                    <button type="submit" className={`w-full py-3 rounded-lg font-bold text-white mt-4 ${type === 'income' ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'}`}>
+                        Save {vehicle} {type === 'income' ? 'Income' : 'Expense'}
+                    </button>
+                </form>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
                 themeColor: 'bg-emerald-600',
                 themeTextColor: 'text-emerald-700',
                 themeBorderColor: 'border-emerald-600',
