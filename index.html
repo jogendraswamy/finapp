@@ -11,7 +11,7 @@
     <script src="https://unpkg.com/lucide@latest"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
-<body class="bg-gray-100 text-gray-800 font-sans antialiased">
+<body className="bg-gray-100 text-gray-800 font-sans antialiased">
     <div id="root"></div>
 
     <script type="text/babel">
@@ -47,7 +47,7 @@
         function App() {
             const [activeVehicle, setActiveVehicle] = useState('JCB');
             
-            // 1. INSTANT LOADING: Load from LocalStorage first so the app never "hangs"
+            // 1. Instant cache load: Never block opening on network requests
             const [transactions, setTransactions] = useState(() => {
                 const saved = localStorage.getItem('equipment_transactions');
                 return saved ? JSON.parse(saved) : [];
@@ -57,23 +57,20 @@
                 return savedLoans ? JSON.parse(savedLoans) : [];
             });
             const [view, setView] = useState('dashboard');
-            
-            // Only show full loading spinner if we have NO offline data at all
             const [isLoading, setIsLoading] = useState(transactions.length === 0);
             const [isSyncing, setIsSyncing] = useState(false);
 
             const currentVehicleConfig = VEHICLE_CONFIGS[activeVehicle];
 
-            // 2. BACKGROUND SYNC: Fetch fresh data quietly in the background
+            // 2. Background cloud synchronization
             useEffect(() => {
                 setIsSyncing(true);
                 fetch(SCRIPT_URL)
-                    .then(res => res.text()) // Fetch as text first to handle Google HTML errors safely
+                    .then(res => res.text())
                     .then(text => {
                         try {
                             const data = JSON.parse(text);
                             const parsed = data.map(item => {
-                                // Reads the new vehicle column you added
                                 let vehicleType = (item.vehicle || '').toString().trim().toUpperCase();
                                 if (!vehicleType) {
                                     if (item.notes && item.notes.toUpperCase().includes('[TRACTOR]')) {
@@ -85,20 +82,17 @@
                                 return { ...item, vehicle: vehicleType };
                             });
                             const sortedData = parsed.sort((a, b) => new Date(b.date) - new Date(a.date));
-                            
-                            // Update state and offline cache
                             setTransactions(sortedData);
                             localStorage.setItem('equipment_transactions', JSON.stringify(sortedData));
-                            setIsLoading(false);
-                            setIsSyncing(false);
-                        } catch(e) {
-                            console.error("Invalid JSON from Google. Keeping offline data.");
+                        } catch (e) {
+                            console.error("Malformed sync payload:", e);
+                        } finally {
                             setIsLoading(false);
                             setIsSyncing(false);
                         }
                     })
                     .catch(err => {
-                        console.error("Network Fetch Error. Keeping offline data.", err);
+                        console.error("Cloud fetch failed, using local offline data:", err);
                         setIsLoading(false);
                         setIsSyncing(false);
                     });
@@ -126,12 +120,10 @@
                     vehicle: activeVehicle
                 };
 
-                // Instant UI Update & Cache Save
                 const updatedTxns = [txnWithVehicle, ...transactions].sort((a, b) => new Date(b.date) - new Date(a.date));
                 setTransactions(updatedTxns);
                 localStorage.setItem('equipment_transactions', JSON.stringify(updatedTxns));
                 
-                // Background cloud sync
                 fetch(SCRIPT_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -193,7 +185,7 @@
                                 {currentVehicleConfig.name} Finapp
                             </h1>
                             <p className="text-xs text-white/90 font-medium">
-                                {isSyncing ? "Syncing in background..." : "Income & Expense Tracker"}
+                                {isSyncing ? "Syncing..." : "Operations Tracker"}
                             </p>
                         </div>
                         
@@ -215,7 +207,7 @@
 
                     <div className="bg-gray-100 px-4 py-1.5 border-b flex justify-between items-center text-xs text-gray-600">
                         <span className="flex items-center gap-1">
-                            Viewing: <strong className="text-gray-900">{activeVehicle}</strong>
+                            Active: <strong className="text-gray-900">{activeVehicle}</strong>
                             {isSyncing && <i data-lucide="refresh-cw" className="w-3 h-3 animate-spin text-gray-400 ml-1"></i>}
                         </span>
                         <span className="font-semibold text-gray-500">{filteredTransactions.length} records</span>
@@ -225,7 +217,7 @@
                         {isLoading ? (
                             <div className="flex flex-col items-center justify-center py-20 text-gray-500">
                                 <i data-lucide="loader-2" className="w-8 h-8 animate-spin mb-2 text-yellow-500"></i>
-                                <p className="font-bold">Loading Data...</p>
+                                <p className="font-bold">Initial load from cloud...</p>
                             </div>
                         ) : view === 'dashboard' ? (
                             <Dashboard totals={totals} profit={profit} transactions={filteredTransactions} vehicle={activeVehicle} config={currentVehicleConfig} />
