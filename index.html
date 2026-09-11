@@ -73,6 +73,7 @@
                         try {
                             const data = JSON.parse(text);
                             const parsed = data.map(item => {
+                                // Reads the new vehicle column you added
                                 let vehicleType = (item.vehicle || '').toString().trim().toUpperCase();
                                 if (!vehicleType) {
                                     if (item.notes && item.notes.toUpperCase().includes('[TRACTOR]')) {
@@ -91,7 +92,7 @@
                             setIsLoading(false);
                             setIsSyncing(false);
                         } catch(e) {
-                            console.error("Invalid JSON from Google (Usually a permissions issue). Keeping offline data.");
+                            console.error("Invalid JSON from Google. Keeping offline data.");
                             setIsLoading(false);
                             setIsSyncing(false);
                         }
@@ -224,8 +225,7 @@
                         {isLoading ? (
                             <div className="flex flex-col items-center justify-center py-20 text-gray-500">
                                 <i data-lucide="loader-2" className="w-8 h-8 animate-spin mb-2 text-yellow-500"></i>
-                                <p className="font-bold">Syncing Google Sheets...</p>
-                                <p className="text-xs mt-2 text-gray-400">This might take a moment...</p>
+                                <p className="font-bold">Loading Data...</p>
                             </div>
                         ) : view === 'dashboard' ? (
                             <Dashboard totals={totals} profit={profit} transactions={filteredTransactions} vehicle={activeVehicle} config={currentVehicleConfig} />
@@ -293,7 +293,7 @@
                             <span>{vehicle} Records</span>
                         </h2>
                         {transactions.length === 0 ? (
-                            <p className="text-gray-400 text-center text-sm py-8">No records found for {vehicle}. Check your connection.</p>
+                            <p className="text-gray-400 text-center text-sm py-8">No records found for {vehicle}.</p>
                         ) : (
                             <div className="space-y-3">
                                 {transactions.map((txn, index) => (
@@ -676,6 +676,4 @@
         root.render(<App />);
     </script>
 </body>
-</html>""")
-}
-}I encountered an error doing what you asked. Could you try again?
+</html>
