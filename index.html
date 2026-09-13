@@ -40,6 +40,47 @@
             }
         };
 
+        const normalizeKey = (key) => key.toString().replace(/[^a-z0-9]/gi, '').toLowerCase();
+        const readField = (record, ...names) => {
+            const fields = Object.fromEntries(Object.entries(record || {}).map(([key, value]) => [normalizeKey(key), value]));
+            for (const name of names) {
+                const value = fields[normalizeKey(name)];
+                if (value !== undefined && value !== null && value !== '') return value;
+            }
+            return '';
+        };
+
+        const normalizeVehicle = (record) => {
+            const vehicle = readField(record, 'vehicle', 'vehicle type').toString().trim().toUpperCase();
+            if (vehicle === 'JCB' || vehicle === 'TRACTOR') return vehicle;
+            return readField(record, 'notes').toString().toUpperCase().includes('[TRACTOR]') ? 'TRACTOR' : 'JCB';
+        };
+
+        const normalizeLoan = (record, index) => {
+            const payments = readField(record, 'emisiPaid', 'emiPaid', 'emiPayments', 'payments');
+            let emisiPaid = payments;
+            if (typeof payments === 'string') {
+                try { emisiPaid = JSON.parse(payments); } catch (e) { emisiPaid = []; }
+            }
+
+            return {
+                ...record,
+                id: readField(record, 'id', 'loanId') || `loan-${index}-${readField(record, 'machineName', 'machine name')}`,
+                machineName: readField(record, 'machineName', 'machine name'),
+                bankName: readField(record, 'bankName', 'bank name'),
+                totalLoanAmount: readField(record, 'totalLoanAmount', 'total loan amount'),
+                downPayment: readField(record, 'downPayment', 'downpayment'),
+                emiAmount: readField(record, 'emiAmount', 'monthly emi'),
+                totalMonths: readField(record, 'totalMonths', 'tenure', 'tenure months'),
+                vehicle: normalizeVehicle(record),
+                emisiPaid: Array.isArray(emisiPaid) ? emisiPaid : []
+            };
+        };
+
+        const loanRecords = (data) => Array.isArray(data) && data.filter(record =>
+            readField(record, 'machineName', 'machine name', 'bankName', 'bank name', 'totalLoanAmount', 'total loan amount', 'emiAmount', 'monthly emi') !== ''
+        );
+
         // --- CORE APP COMPONENT ---
         function App() {
             const [activeVehicle, setActiveVehicle] = useState('JCB');
@@ -66,39 +107,44 @@
                 setIsSyncing(true);
                 setSyncError(false);
                 
-                fetch(SCRIPT_URL)
-                    .then(res => {
-                        if (!res.ok) throw new Error("HTTP error");
-                        return res.text();
-                    })
-                    .then(text => {
-                        try {
-                            const data = JSON.parse(text);
-                            if (!Array.isArray(data)) throw new Error("Data not array");
+                const readJson = (response) => {
+                    if (!response.ok) throw new Error("HTTP error");
+                    return response.text().then(JSON.parse);
+                };
 
-                            const parsed = data.map(item => {
-                                let vType = (item.vehicle || '').toString().trim().toUpperCase();
-                                if (vType !== 'JCB' && vType !== 'TRACTOR') {
-                                    const notesUpper = (item.notes || '').toUpperCase();
-                                    vType = notesUpper.includes('[TRACTOR]') ? 'TRACTOR' : 'JCB';
-                                }
-                                return { ...item, vehicle: vType };
-                            });
-                            
-                            const sortedData = parsed.sort((a, b) => new Date(b.date) - new Date(a.date));
-                            setTransactions(sortedData);
-                            localStorage.setItem('equipment_transactions', JSON.stringify(sortedData));
-                        } catch (err) {
-                            console.error("Parse Error. Using cache.", err);
-                            setSyncError(true);
-                        } finally {
-                            setIsInitialLoad(false);
-                            setIsSyncing(false);
+                fetch(SCRIPT_URL)
+                    .then(readJson)
+                    .then(async data => {
+                        const transactionData = Array.isArray(data) ? data : (data.transactions || data.transactionData || []);
+                        if (!Array.isArray(transactionData)) throw new Error("Transaction data not array");
+
+                        const parsed = transactionData.map(item => ({ ...item, vehicle: normalizeVehicle(item) }));
+                        const sortedData = parsed.sort((a, b) => new Date(b.date) - new Date(a.date));
+                        setTransactions(sortedData);
+                        localStorage.setItem('equipment_transactions', JSON.stringify(sortedData));
+
+                        // Newer endpoints return both sheets together. Older endpoints can expose LoanData by query.
+                        let remoteLoans = loanRecords(Array.isArray(data) ? null : (data.loans || data.loanData));
+                        if (!remoteLoans) {
+                            try {
+                                const loanData = await fetch(`${SCRIPT_URL}?sheet=LoanData`).then(readJson);
+                                remoteLoans = loanRecords(Array.isArray(loanData) ? loanData : (loanData.loans || loanData.loanData));
+                            } catch (err) {
+                                console.warn("Loan data sync failed. Using cached loans.", err);
+                            }
+                        }
+
+                        if (remoteLoans) {
+                            const normalizedLoans = remoteLoans.map(normalizeLoan);
+                            setLoans(normalizedLoans);
+                            localStorage.setItem('equipment_loans', JSON.stringify(normalizedLoans));
                         }
                     })
                     .catch(err => {
                         console.error("Fetch failed. Using cache.", err);
                         setSyncError(true);
+                    })
+                    .finally(() => {
                         setIsInitialLoad(false);
                         setIsSyncing(false);
                     });
